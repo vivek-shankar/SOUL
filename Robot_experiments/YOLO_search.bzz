@@ -1,0 +1,335 @@
+include "vec2.bzz"
+
+target = 0
+cur_goal = nil
+
+minx = -0.9
+miny = -1.3
+maxy = 1.3
+maxx = 1.5
+L = 0.105
+R = 0.015
+BSTIG_ID = 100
+capturer = 4
+processor = 11
+INJUCTION_KEY = 0
+picture_taken = 0
+set_take_picture = 0
+target_picture = 0
+
+led_paterns={.0=0,	.1=250,	.2=0,		.3=0,		.4=250,		.5=0,		.6=0,		.7=0,		.8=0,
+						.9=250, .10=0,	.11=0,	.12=250,	.13=0,	.14=0,	.15=0,	.16=0,	.17=0,
+						.18=0,	.19=0,	.20=250,	.21=0,	.22=0,	.23=250,	.24=0, .25=0,	.26=0,
+						.27=0,	.28=0,	.29=0,	.30=250,	.31=0,	.32=0,	.33=250,	.34=0,	.35=0,
+						.36=0,	.37=0,	.38=0,	.39=0,	.40=250,	.41=0,	.42=0,	.43=250,	.44=0,
+						.45=0,	.46=0,	.47=0,	.48=0,	.49=0,	.50=250,	.51=0,	.52=0,	.53=250,
+						.54=250,	.55=0,	.56=0,	.57=0,	.58=0,	.59=0,	.60=250,	.61=0,	.62=0,
+						.63=0,	.64=0,	.65=250,	.66=0,	.67=0,	.68=0,	.69=0,	.70=0,	.71=250,
+						.72=0,	.73=0,	.74=0,	.75=250,	.76=250,	.77=250,	.78=250,	.79=250,	.80=250,
+						.81=250,	.82=0,	.83=0,	.84=0,	.85=0,	.86=0,	.87=0,	.88=250,	.89=0,
+						.90=0,	.91=0,	.92=0,	.93=0,	.94=0,	.95=0,	.96=0,	.97=0,	.98=0}
+
+waypoints = {
+	.0 = math.vec2.new(minx, 0.0),
+	.1 = math.vec2.new(0.0, maxy+0.1),
+	.2 = math.vec2.new(maxx, miny+0.2),
+	.3 = math.vec2.new(maxx, 0.0),
+	.4 = math.vec2.new(0.0, 0.0)
+}
+
+target_ang = {.0=15*math.pi/16, .1=math.pi/2, .2=0.0, .3=0.0}
+
+function random_abs() {
+
+		if(cur_goal==nil) {
+			x = math.rng.uniform(minx+0.15, maxx-0.15)
+			y = math.rng.uniform(miny+0.15, maxy-0.15)
+
+			cur_goal = math.vec2.new(x, y)
+			log(cur_goal.x, " : ", cur_goal.y, " | ", absolute_position.x, " : ", absolute_position.y)
+		} else if(math.vec2.length(math.vec2.new(cur_goal.x-absolute_position.x, cur_goal.y-absolute_position.y)) < 0.1) {
+			x = math.rng.uniform(minx, maxx)
+			y = math.rng.uniform(miny, maxy)
+
+			cur_goal = math.vec2.new(x, y)
+			log(cur_goal.x, " : ", cur_goal.y, " | ", absolute_position.x, " : ", absolute_position.y)
+		}
+		movetotarget(cur_goal)
+}
+
+function drive(v, omega){
+	#log("Params: ", v, ", ", omega)
+	v_l = (( 2.0 * v ) - (omega * L )) / (2.0 * R)
+	v_r = (( 2.0 * v ) + (omega * L )) / (2.0 * R)
+
+	if(detect_collision() == 0) {
+		avanti(v, omega)
+	} else {
+		log("Avoiding collision")
+		avoid_collision(v_l, v_r, 1)
+	}
+}
+
+function detect_collision(){
+	nearest = {
+		.distance = 1000.0,
+		.angle = 0.0,
+		.neigh = -1
+	}
+	neighbors.foreach(
+		function(rid, data) {
+			if(data.distance < nearest.distance and data.distance > 0.0){
+				nearest.distance = data.distance
+				nearest.angle = data.azimuth
+				nearest.neigh = rid
+				#log(rid, " dis ", data.distance)
+				}
+  	})
+
+	result = math.vec2.newp(nearest.distance, nearest.angle)
+
+	# meters in optitrack
+	#log("D: ", math.vec2.length(result), ", id: ", nearest.neigh)
+	if(math.vec2.length(result) > 45.0 / 100.0){
+		return 0
+	} else {
+		#log("Angle: ", math.vec2.angle(result))
+		if(math.vec2.angle(result) > -math.pi/3.0 and math.vec2.angle(result) < math.pi/3.0)
+			return 1
+		else
+			return 0
+	}
+}
+
+
+function avoid_collision(v_l, v_r){
+	# MA's collision detection
+	var default_velocity = 2.0
+	var safety_radius = 0.2
+	var k_v = 3.5 # 95 original - velocity gain
+	var k_w = 40   # 1200 original - angular velocity gain
+	var d_i = 100
+	var alpha_rad_i = 0.0
+
+	var i = 0
+	all_neighbors = neighbors.map(
+	  function(rid, data) {
+	    var c = {}
+	    c.distance = data.distance
+	    c.azimuth = data.azimuth
+	    return c
+	  })
+
+	result = all_neighbors.reduce(function(rid, data, nearest) {
+		if(data.distance < nearest.distance and data.distance > 0.0) {
+			nearest.distance = data.distance
+			nearest.angle = data.azimuth
+		}
+	  return nearest
+	  }, {.distance= 100.0, .angle= 0.0})
+
+	d_i = result.distance / 1000.0
+	data_alpha_i = result.angle
+	res = math.vec2.newp(d_i, data_alpha_i)
+
+	#log("D: ", d_i, " alpha: ", data_alpha_i)
+
+	penalty = math.exp(d_i - safety_radius)
+	if( math.cos(math.vec2.angle(res)) < 0.0){
+		penalty = math.exp(-(d_i - safety_radius))
+	}
+
+	#W = penalty
+	V = default_velocity - math.cos(math.vec2.angle(res)) * penalty * k_v
+
+	if(alpha_rad_i > 0.0) {
+	  W = -penalty
+	} else {
+	  W = penalty
+	}
+
+	W = -k_w * penalty * math.sin( math.vec2.angle(res) )
+
+	# not really helping much
+	v_left = ((V - R * W) + v_l * 0.001) / 2.0
+	v_right = ((V + R * W) + v_r *0.001) / 2.0
+
+	#v_left = (V - R * W)
+	#v_right = (V + R * W)
+
+
+	set_wheels(v_left, v_right)
+}
+
+
+function movetotarget(goal) {
+	goto_vec = math.vec2.new(goal.x - absolute_position.x, goal.y - absolute_position.y)
+	goto_vec = math.vec2.newp(math.vec2.length(goto_vec), math.vec2.angle(goto_vec) - absolute_position.theta)
+
+	if(math.vec2.length(goto_vec) > 0.35)
+		goto_vec = math.vec2.scale(goto_vec, 0.35/math.vec2.length(goto_vec))
+
+	drive(math.vec2.length(goto_vec),  math.vec2.angle(goto_vec))
+}
+
+function look_at_object(ang) {
+	omega = 2*(ang - absolute_position.theta)
+	v_l = - (omega * L ) / (2.0 * R)
+	v_r = (omega * L ) / (2.0 * R)
+	set_wheels(v_l, v_r)
+}
+
+function WrapValue(ang) {
+         while(ang > math.pi)
+				 	ang = ang - 2*math.pi
+         while(ang < -math.pi)
+				 	ang = ang + 2*math.pi
+				 return ang
+}
+
+function avanti(v, omega){
+	var hard_turn = 0.6
+
+	v_l = 0.0
+	v_r = 0.0
+	v_max = 5.0
+
+	if(math.abs(omega) > hard_turn){
+		#log("Hard turn...")
+		if(WrapValue(omega) > 0.0) {
+			v_l = -v_max * 0.5
+			v_r = v_max * 0.5
+		} else {
+			v_l = v_max * 0.5
+			v_r = -v_max * 0.5
+		}
+	} else {
+		v_l = (( 2.0 * v ) - (omega * L )) / (2.0 * R)
+		v_r = (( 2.0 * v ) + (omega * L )) / (2.0 * R)
+	}
+
+	set_wheels(v_l, v_r)
+}
+################################################################################
+
+function set_id_leds() {
+	set_led(led_paterns[(id-1)*9],led_paterns[(id-1)*9+1],led_paterns[(id-1)*9+2],0)
+	set_led(led_paterns[(id-1)*9+3],led_paterns[(id-1)*9+4],led_paterns[(id-1)*9+5],1)
+	set_led(led_paterns[(id-1)*9+6],led_paterns[(id-1)*9+7],led_paterns[(id-1)*9+8],2)
+}
+
+function init() {
+	s = swarm.create(1)
+	s.join()
+	set_id_leds()
+	blobstig= bstigmergy.create(BSTIG_ID)
+	if(id == processor){
+		blobstig.setgetter()	
+	}
+	math.rng.setseed(id)
+}
+
+# Some global varialbles 
+picture_wait = 0
+processed_key = 0
+processor_wait = 0
+caputrer_current_key = 0
+yolo_state = 0
+current_key = 0
+done = 0
+process_timer = 0
+set_freq = 0
+function step() {
+if(set_freq != 1){
+	set_freq = 1
+	set_led_freq(0)	
+}
+	if(id!=capturer) {
+		random_abs()
+	} 
+	else{
+			if(done) {
+				target = 0
+				set_wheels(0.0, 0.0)
+				return
+			}
+			if(math.vec2.length(math.vec2.new(waypoints[target].x-absolute_position.x, waypoints[target].y-absolute_position.y)) < 0.1) {
+				if(picture_wait < 30)
+					look_at_object(target_ang[target])
+				log("Smile !!")
+				if(picture_wait > 30 and target_picture == 0 and set_take_picture == 0){
+					set_wheels(0.0, 0.0)
+					set_take_picture = 1
+					takepicture()
+				}
+
+				if(set_take_picture == 1){
+					statuscam = getcamstatus()
+					if(statuscam == 0){
+						image = getcampicture()
+						blobstig.putblob(INJUCTION_KEY,image)
+						INJUCTION_KEY = INJUCTION_KEY + 1
+						image = nil
+						set_take_picture = 0
+						target_picture = 1
+					}
+				}
+				else{
+					picture_wait = picture_wait + 1
+				}
+				if(picture_wait > 150) {
+					picture_wait = 0
+					target_picture = 0
+					if(target == 3)
+						done = 1
+					else
+						target = target + 1
+				}
+			} 
+			else{
+				movetotarget(waypoints[target])
+			}
+			#neighbors.broadcast("current_key",INJUCTION_KEY)
+	}
+	if(id == processor){
+		#if(blobstig.get(current_key+1)){
+		#	caputrer_current_key = current_key+1
+		#}
+		#caputrer_current_key = blobstig.size()
+		log("Pros K: ",current_key)
+		if(yolo_state == 0){
+			bStatus = blobstig.blobstatus(current_key)
+			log("Status ", bStatus)
+				if(bStatus == 1){
+					m_blob = blobstig.getblob(current_key)
+					log("Getting blob for key ",current_key)
+					if(m_blob != nil){
+						log("GOT BLOB of key ->", current_key)
+						input_name = string.tostring(current_key)
+						input_name = string.concat("Reconstructed_image_",input_name)
+						log("concatinated input_name string ", input_name,".jpg")
+						out_name = string.tostring(current_key)
+						out_name = string.concat("Processed_image_",out_name)
+						writepicture(input_name,m_blob)
+						yolo_pros(input_name,out_name);							
+						yolo_state = 1	
+			      		}
+
+				}
+		}
+		if(yolo_state == 1){
+			yol_Status = getyolostatus()
+			log("loop 2 yolo status : ",yol_Status )
+			if(yol_Status == 0){
+				blobstig.putblob(current_key,nil)
+				current_key = current_key + 1
+				yolo_state = 0
+				process_timer = 0
+			}
+		}
+	}
+	
+}
+
+function destroy() {
+}
